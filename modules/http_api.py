@@ -7,11 +7,14 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from modules.stats import DefectStats
+
 logger = logging.getLogger(__name__)
 
 _app = None
 _detector = None
 _class_names = None
+_stats_collector = None
 
 
 class DetectResponse(BaseModel):
@@ -22,7 +25,7 @@ class DetectResponse(BaseModel):
 
 def create_app(model_path=None, num_classes=4, class_names=None,
                device="auto", score_threshold=0.5, nms_threshold=0.5):
-    global _app, _detector, _class_names
+    global _app, _detector, _class_names, _stats_collector
 
     if class_names is None:
         class_names = ["scratch", "dent", "crack"]
@@ -36,7 +39,7 @@ def create_app(model_path=None, num_classes=4, class_names=None,
 
     @app.on_event("startup")
     async def startup():
-        global _detector
+        global _detector, _stats_collector
         if model_path and os.path.exists(model_path):
             from modules.inference import Detector
             _detector = Detector(
@@ -49,6 +52,8 @@ def create_app(model_path=None, num_classes=4, class_names=None,
             logger.info(f"Model loaded from {model_path}")
         else:
             logger.warning("No model path provided or file not found. API will return errors until model is loaded.")
+
+        _stats_collector = DefectStats(_class_names)
 
     @app.post("/detect", response_model=DetectResponse)
     async def detect_image(file: UploadFile = File(...)):
@@ -123,6 +128,46 @@ def create_app(model_path=None, num_classes=4, class_names=None,
             return {"status": "reloaded", "model_path": path}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+
+    @app.post("/detect/stats")
+    async def detect_with_stats(file: UploadFile = File(...)):
+        if _detector is None:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+        if _stats_collector is None:
+            raise HTTPException(status_code=503, detail="Stats collector not initialized")
+
+        try:
+            contents = await file.read()
+            img = Image.open(io.BytesIO(contents)).convert("RGB")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid image: {str(e)}")
+
+        results = _detector.detect(img)
+        stats_summary = _stats_collector.get_single_summary(results, image_id=None)
+
+        return {
+            "detections": results,
+            "num_defects": len(results),
+            "image_size": list(img.size),
+            "statistics": stats_summary,
+        }
+
+    @app.get("/stats/summary")
+    async def stats_summary():
+        if _stats_collector is None:
+            raise HTTPException(status_code=503, detail="Stats collector not initialized")
+
+        batch_summary = _stats_collector.get_batch_summary()
+        return batch_summary
+
+    @app.post("/stats/reset")
+    async def stats_reset():
+        global _stats_collector
+        if _stats_collector is None:
+            raise HTTPException(status_code=503, detail="Stats collector not initialized")
+
+        _stats_collector.reset()
+        return {"status": "reset"}
 
     _app = app
     return app

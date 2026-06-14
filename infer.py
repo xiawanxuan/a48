@@ -8,6 +8,7 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modules.inference import Detector
+from modules.stats import DefectStats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ def main():
     parser.add_argument("--output", type=str, default="./inference_results", help="Output directory for results")
     parser.add_argument("--score_threshold", type=float, default=None, help="Score threshold override")
     parser.add_argument("--visualize", action="store_true", help="Save visualized detection results")
+    parser.add_argument("--stats", action="store_true", help="Output defect classification statistics table")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -58,6 +60,10 @@ def main():
 
     all_results = []
 
+    stats_collector = None
+    if args.stats:
+        stats_collector = DefectStats(class_names)
+
     for img_path in image_paths:
         if not os.path.exists(img_path):
             logger.warning(f"Image not found: {img_path}")
@@ -78,6 +84,11 @@ def main():
             cls_name = class_names[det["label"] - 1] if det["label"] <= len(class_names) else f"class_{det['label']}"
             logger.info(f"    {cls_name}: score={det['score']:.4f}, bbox={det['bbox']}")
 
+        if stats_collector:
+            single_summary = stats_collector.get_single_summary(detections, image_id=img_path)
+            table = stats_collector.format_table(single_summary, title=f"Stats: {os.path.basename(img_path)}")
+            print(table)
+
         if args.visualize:
             vis_path = os.path.join(
                 args.output,
@@ -89,6 +100,14 @@ def main():
     with open(results_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     logger.info(f"Results saved to {results_path}")
+
+    if stats_collector:
+        batch_summary = stats_collector.get_batch_summary()
+        batch_table = stats_collector.format_table(batch_summary, title="Batch Defect Statistics Summary")
+        print(batch_table)
+
+        stats_path = os.path.join(args.output, "defect_stats.json")
+        stats_collector.save_json(batch_summary, stats_path)
 
 
 if __name__ == "__main__":
